@@ -67,13 +67,13 @@ public static class HeightMapGenerator
 
                 // Preserve water depths but apply curve to terrain
 
-                if (heightValue > settings.waterLevel)
+                //if (heightValue > settings.waterLevel)
 
-                {
+                //{
 
                     heightValue = heightCurve_threadsafe.Evaluate(heightValue);
 
-                }
+                //}
 
 
 

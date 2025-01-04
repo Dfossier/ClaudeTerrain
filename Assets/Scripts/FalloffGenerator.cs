@@ -6,7 +6,7 @@ public static class FalloffGenerator
 {
     private const int NUM_SMALL_SHAPES = 5;
     private const float WORLD_REGION_SIZE = 2000f;
-    private const float WORLD_SPACE_TRANSITION = 300f; // Fixed world-space transition width
+    private const float WORLD_SPACE_TRANSITION = 150f; // Fixed world-space transition width
     private const float SHORELINE_NOISE_SCALE = 0.003f;
     private const float SHORELINE_NOISE_STRENGTH = 0.5f;
     private const float POSITION_EPSILON = 0.001f; // For position snapping
