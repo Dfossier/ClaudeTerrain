@@ -1,39 +1,5 @@
 using UnityEngine;
 
-[System.Serializable]
-public class GrassSettings
-{
-    public Texture2D grassTexture;
-    public Color healthyColor = new Color(0.2f, 0.8f, 0.2f);
-    public Color dryColor = new Color(0.8f, 0.8f, 0.2f);
-    [Range(0, 5)]
-    public float minWidth = 1f;
-    [Range(0, 5)]
-    public float maxWidth = 1.5f;
-    [Range(0, 5)]
-    public float minHeight = 1f;
-    [Range(0, 5)]
-    public float maxHeight = 1.5f;
-    [Range(0, 1)]
-    public float noiseSpread = 0.1f;
-    [Range(0, 1)]
-    public float minDensity = 0.1f;
-    [Range(0, 1)]
-    public float maxDensity = 0.8f;
-    [Range(0, 1)]
-    public float moistureThreshold = 0.3f;
-    [Range(0, 1)]
-    public float steepnessThreshold = 0.7f;
-
-    [Header("Wind Settings")]
-    [Range(0, 1)]
-    public float windStrength = 0.5f;
-    [Range(0, 1)]
-    public float windSpeed = 0.5f;
-    [Range(0, 1)]
-    public float windFrequency = 0.5f;
-}
-
 public class TerrainDetailManager : MonoBehaviour
 {
     private MeshFilter meshFilter;
@@ -43,16 +9,24 @@ public class TerrainDetailManager : MonoBehaviour
     private Vector2 chunkCoord;
     private bool isInitialized;
     private GrassSettings grassSettings;
+    private float lastUpdateTime;
+    private const float UPDATE_INTERVAL = 0.1f; // Update grass every 100ms
+    private Camera mainCamera;
+    private float distanceToCamera;
+    private const float MAX_GRASS_DISTANCE = 100f;
+    private MaterialPropertyBlock propertyBlock;
+    private float currentLODBlend;
+    private bool isGrassEnabled = true;
 
     public void Initialize(Vector2 coord, Material grassMat, float[,] heights, float[,] moisture, GrassSettings settings)
     {
-        if (isInitialized) return;
-
         chunkCoord = coord;
         heightMap = heights;
         moistureMap = moisture;
         grassSettings = settings;
         meshFilter = GetComponent<MeshFilter>();
+        mainCamera = Camera.main;
+        propertyBlock = new MaterialPropertyBlock();
 
         if (grassMat != null)
         {
@@ -63,20 +37,131 @@ public class TerrainDetailManager : MonoBehaviour
         isInitialized = true;
     }
 
+    private void Update()
+    {
+        if (!isInitialized || !isGrassEnabled || mainCamera == null) return;
+
+        // Update distance to camera
+        distanceToCamera = Vector3.Distance(transform.position, mainCamera.transform.position);
+
+        // Only update material properties periodically
+        if (Time.time - lastUpdateTime > UPDATE_INTERVAL)
+        {
+            UpdateGrassProperties();
+            lastUpdateTime = Time.time;
+        }
+    }
+
+    public void UpdateLODSettings(float lodBlend)
+    {
+        if (!isInitialized || !isGrassEnabled) return;
+        currentLODBlend = lodBlend;
+        UpdateGrassProperties();
+    }
+
+    private void UpdateGrassProperties()
+    {
+        if (grassMaterial == null || !isGrassEnabled || grassSettings == null) return;
+
+        // Use LOD blend from terrain chunk system
+        float distanceLOD = Mathf.Clamp01(distanceToCamera / grassSettings.maxDrawDistance);
+        float finalLODBlend = Mathf.Max(currentLODBlend, distanceLOD);
+
+        // Progressive density reduction
+        float densityMultiplier = Mathf.Lerp(1f, grassSettings.densityFalloff, finalLODBlend);
+        float finalDensity = Mathf.Lerp(grassSettings.maxDensity, grassSettings.minDensity, finalLODBlend);
+
+        // Enhanced wind parameters with micro detail
+        float timeOffset = Time.time * grassSettings.windSpeed;
+        float windX = Mathf.Sin(timeOffset * 0.5f) + Mathf.Sin(timeOffset * 0.7f) * grassSettings.microDetailStrength;
+        float windZ = Mathf.Cos(timeOffset * 0.3f) + Mathf.Cos(timeOffset * 0.5f) * grassSettings.microDetailStrength;
+        Vector3 windDirection = new Vector3(windX, 0, windZ).normalized;
+
+        // Enhanced property updates
+        propertyBlock.SetFloat("_GrassDensity", finalDensity * densityMultiplier);
+        propertyBlock.SetVector("_WindDirection", windDirection);
+        propertyBlock.SetFloat("_WindSpeed", grassSettings.windSpeed);
+        propertyBlock.SetFloat("_WindStrength", grassSettings.windStrength * (1f - finalLODBlend * 0.5f));
+        propertyBlock.SetFloat("_WindFrequency", grassSettings.windFrequency);
+        propertyBlock.SetFloat("_MicroDetailStrength", grassSettings.microDetailStrength);
+        propertyBlock.SetFloat("_LODBlend", finalLODBlend);
+        propertyBlock.SetFloat("_LODTransitionSpeed", grassSettings.lodTransitionSpeed);
+        propertyBlock.SetFloat("_ColorVariation", grassSettings.colorVariation);
+        propertyBlock.SetFloat("_HeightInfluence", grassSettings.heightInfluence);
+        propertyBlock.SetFloat("_AmbientOcclusion", grassSettings.ambientOcclusion);
+        propertyBlock.SetFloat("_ShadowSoftness", grassSettings.shadowSoftness);
+        propertyBlock.SetFloat("_RimLightIntensity", grassSettings.rimLightIntensity);
+
+        // Apply properties
+        MeshRenderer renderer = GetComponent<MeshRenderer>();
+        if (renderer != null)
+        {
+            renderer.SetPropertyBlock(propertyBlock);
+        }
+    }
+
     private void SetupGrassMaterial()
     {
-        if (grassMaterial == null || heightMap == null || moistureMap == null) return;
-
-        // Create moisture texture
         int width = moistureMap.GetLength(0);
         int height = moistureMap.GetLength(1);
-        Texture2D moistureTexture = new Texture2D(width, height);
 
-        Color[] colors = new Color[width * height];
+        // Create and setup textures
+        SetupMoistureTexture(width, height);
+        SetupHeightTexture(width, height);
+
+        // Set base material properties
+        SetMaterialProperties();
+
+        // Setup mesh components
+        MeshFilter meshFilter = GetComponent<MeshFilter>();
+        if (meshFilter == null)
+        {
+            meshFilter = gameObject.AddComponent<MeshFilter>();
+            
+            // Create a simple quad mesh for the grass to generate from
+            Mesh quadMesh = new Mesh();
+            quadMesh.vertices = new Vector3[] {
+                new Vector3(-0.5f, 0, -0.5f),
+                new Vector3(0.5f, 0, -0.5f),
+                new Vector3(-0.5f, 0, 0.5f),
+                new Vector3(0.5f, 0, 0.5f)
+            };
+            quadMesh.triangles = new int[] { 0, 2, 1, 2, 3, 1 };
+            quadMesh.uv = new Vector2[] {
+                new Vector2(0, 0),
+                new Vector2(1, 0),
+                new Vector2(0, 1),
+                new Vector2(1, 1)
+            };
+            quadMesh.RecalculateNormals();
+            meshFilter.sharedMesh = quadMesh;
+        }
+
+        MeshRenderer grassRenderer = GetComponent<MeshRenderer>();
+        if (grassRenderer == null)
+        {
+            grassRenderer = gameObject.AddComponent<MeshRenderer>();
+        }
+        
+        if (grassMaterial.shader == null)
+        {
+            return;
+        }
+        
+        grassRenderer.material = grassMaterial;
+    }
+
+    private void SetupMoistureTexture(int width, int height)
+    {
+        Texture2D moistureTexture = new Texture2D(width, height, TextureFormat.R16, false);
+        moistureTexture.wrapMode = TextureWrapMode.Clamp;
+        moistureTexture.filterMode = FilterMode.Bilinear;
+
+        float[] moistureData = new float[width * height];
         float minMoisture = float.MaxValue;
         float maxMoisture = float.MinValue;
 
-        // Find min/max moisture values
+        // Find min/max and fill data
         for (int y = 0; y < height; y++)
         {
             for (int x = 0; x < width; x++)
@@ -84,59 +169,97 @@ public class TerrainDetailManager : MonoBehaviour
                 float m = moistureMap[x, y];
                 minMoisture = Mathf.Min(minMoisture, m);
                 maxMoisture = Mathf.Max(maxMoisture, m);
+                moistureData[y * width + x] = m;
             }
         }
 
-        // Add debug logging
-        Debug.Log($"Chunk {chunkCoord}: Moisture range {minMoisture:F2} to {maxMoisture:F2}");
-        if (maxMoisture < grassSettings.moistureThreshold)
+        // Normalize and set colors
+        Color[] colors = new Color[width * height];
+        for (int i = 0; i < moistureData.Length; i++)
         {
-            Debug.LogWarning($"Chunk {chunkCoord}: All moisture values below threshold {grassSettings.moistureThreshold}!");
+            float normalizedMoisture = Mathf.InverseLerp(minMoisture, maxMoisture, moistureData[i]);
+            colors[i] = new Color(normalizedMoisture, normalizedMoisture, normalizedMoisture, 1);
         }
 
-        // Normalize and set colors
+        moistureTexture.SetPixels(colors);
+        moistureTexture.Apply(true, false);
+        grassMaterial.SetTexture("_MoistureMap", moistureTexture);
+        grassMaterial.SetFloat("_MoistureMin", minMoisture);
+        grassMaterial.SetFloat("_MoistureMax", maxMoisture);
+    }
+
+    private void SetupHeightTexture(int width, int height)
+    {
+        Texture2D heightTexture = new Texture2D(width, height, TextureFormat.R16, false);
+        heightTexture.wrapMode = TextureWrapMode.Clamp;
+        heightTexture.filterMode = FilterMode.Bilinear;
+
+        Color[] heights = new Color[width * height];
         for (int y = 0; y < height; y++)
         {
             for (int x = 0; x < width; x++)
             {
-                float normalizedMoisture = Mathf.InverseLerp(minMoisture, maxMoisture, moistureMap[x, y]);
-                colors[y * width + x] = new Color(normalizedMoisture, normalizedMoisture, normalizedMoisture);
+                float h = heightMap[x, y];
+                heights[y * width + x] = new Color(h, h, h, 1);
             }
         }
 
-        moistureTexture.SetPixels(colors);
-        moistureTexture.Apply();
+        heightTexture.SetPixels(heights);
+        heightTexture.Apply(true, false);
+        grassMaterial.SetTexture("_HeightMap", heightTexture);
+    }
 
-        // Set material properties
-        grassMaterial.SetTexture("_MoistureMap", moistureTexture);
-        grassMaterial.SetFloat("_MoistureMin", minMoisture);
-        grassMaterial.SetFloat("_MoistureMax", maxMoisture);
+    private void SetMaterialProperties()
+    {
+        if (grassMaterial == null || grassSettings == null) return;
+
+        // Color settings
+        grassMaterial.SetColor("_HealthyColor", grassSettings.healthyColor);
+        grassMaterial.SetColor("_DryColor", grassSettings.dryColor);
+        grassMaterial.SetFloat("_ColorVariation", grassSettings.colorVariation);
+
+        // Blade settings
+        grassMaterial.SetFloat("_GrassHeight", Mathf.Lerp(grassSettings.minHeight, grassSettings.maxHeight, 0.5f));
+        grassMaterial.SetFloat("_GrassWidth", Mathf.Lerp(grassSettings.minWidth, grassSettings.maxWidth, 0.5f));
+        grassMaterial.SetFloat("_GrassDensity", grassSettings.maxDensity);
+        grassMaterial.SetFloat("_NoiseSpread", grassSettings.noiseSpread);
+
+        // Placement settings
         grassMaterial.SetFloat("_MoistureThreshold", grassSettings.moistureThreshold);
-        grassMaterial.SetFloat("_WaterLevel", 0.1f); // You might want to make this configurable
-        grassMaterial.SetFloat("_GrassHeight", (grassSettings.maxHeight + grassSettings.minHeight) / 2);
-        grassMaterial.SetFloat("_GrassWidth", (grassSettings.maxWidth + grassSettings.minWidth) / 2);
-        grassMaterial.SetFloat("_WindSpeed", grassSettings.windSpeed * 10); // Scale to shader range
+        grassMaterial.SetFloat("_SteepnessThreshold", grassSettings.steepnessThreshold);
+        grassMaterial.SetFloat("_HeightInfluence", grassSettings.heightInfluence);
+
+        // Wind settings
+        grassMaterial.SetFloat("_WindSpeed", grassSettings.windSpeed);
         grassMaterial.SetFloat("_WindStrength", grassSettings.windStrength);
         grassMaterial.SetFloat("_WindFrequency", grassSettings.windFrequency);
-        grassMaterial.SetFloat("_GrassDensity", Mathf.Lerp(grassSettings.minDensity, grassSettings.maxDensity, 0.5f));
-        grassMaterial.SetColor("_GrassColor", grassSettings.healthyColor);
+        grassMaterial.SetFloat("_MicroDetailStrength", grassSettings.microDetailStrength);
 
-        // Attach material to renderer
-        MeshRenderer grassRenderer = GetComponent<MeshRenderer>();
-        if (grassRenderer == null)
-        {
-            grassRenderer = gameObject.AddComponent<MeshRenderer>();
-        }
-        grassRenderer.material = grassMaterial;
+        // LOD settings
+        grassMaterial.SetFloat("_MaxDrawDistance", grassSettings.maxDrawDistance);
+        grassMaterial.SetFloat("_LODTransitionSpeed", grassSettings.lodTransitionSpeed);
+        grassMaterial.SetFloat("_DensityFalloff", grassSettings.densityFalloff);
+
+        // Lighting settings
+        grassMaterial.SetFloat("_AmbientOcclusion", grassSettings.ambientOcclusion);
+        grassMaterial.SetFloat("_ShadowSoftness", grassSettings.shadowSoftness);
+        grassMaterial.SetFloat("_RimLightIntensity", grassSettings.rimLightIntensity);
+
+        // Transform data
+        grassMaterial.SetVector("_ChunkOffset", new Vector4(transform.position.x, transform.position.y, transform.position.z, 0));
+        grassMaterial.SetVector("_ChunkScale", new Vector4(transform.localScale.x, transform.localScale.y, transform.localScale.z, 0));
+
+        grassMaterial.SetFloat("_ClumpScale", grassSettings.clumpScale);
+        grassMaterial.SetFloat("_ClumpSpread", grassSettings.clumpSpread);
     }
 
     public void UpdateWindSettings(GrassSettings settings)
     {
-        if (grassMaterial != null)
+        if (!isInitialized) return;
+        grassSettings = settings;
+        if (propertyBlock != null)
         {
-            grassMaterial.SetFloat("_WindStrength", settings.windStrength);
-            grassMaterial.SetFloat("_WindSpeed", settings.windSpeed * 10);
-            grassMaterial.SetFloat("_WindFrequency", settings.windFrequency);
+            UpdateGrassProperties();
         }
     }
 

@@ -18,6 +18,8 @@ Shader "Custom/TerrainGrassShader" {
         _MoistureThreshold ("Moisture Threshold", Range(0,1)) = 0.3
         _WaterLevel ("Water Level", Float) = 0.0
         _TessellationUniform ("Tessellation", Range(1, 64)) = 1
+        _ClumpScale ("Clump Scale", Range(0.1, 10.0)) = 2.0
+        _ClumpSpread ("Clump Spread", Range(0, 1)) = 0.7
     }
 
     SubShader {
@@ -76,58 +78,34 @@ Shader "Custom/TerrainGrassShader" {
             float _MoistureMax;
             float _MoistureThreshold;
             float _WaterLevel;
+            float _ClumpScale;
+            float _ClumpSpread;
+            float _TessellationUniform;
 
-            float2 hash2D(float2 p)
-            {
-                float2 r = mul(float2x2(127.1, 311.7, 269.5, 183.3), p);
-                return frac(sin(r) * 43758.5453);
-            }
-
-            float perlinNoise(float2 p)
-            {
-                float2 pi = floor(p);
-                float2 pf = p - pi;
-                
-                float2 w = pf * pf * (3.0 - 2.0 * pf);
-                
-                float n00 = dot(hash2D(pi + float2(0.0, 0.0)) * 2.0 - 1.0, pf - float2(0.0, 0.0));
-                float n10 = dot(hash2D(pi + float2(1.0, 0.0)) * 2.0 - 1.0, pf - float2(1.0, 0.0));
-                float n01 = dot(hash2D(pi + float2(0.0, 1.0)) * 2.0 - 1.0, pf - float2(0.0, 1.0));
-                float n11 = dot(hash2D(pi + float2(1.0, 1.0)) * 2.0 - 1.0, pf - float2(1.0, 1.0));
-                
-                return lerp(lerp(n00, n10, w.x), lerp(n01, n11, w.x), w.y);
-            }
 
             float rand(float3 pos) {
                 return frac(sin(dot(pos.xyz, float3(12.9898, 78.233, 45.5432))) * 43758.5453);
             }
 
-            // Match project's noise settings
-            float sampleNoise(float2 worldPos, float scale)
-            {
-                float amplitude = 1;
-                float frequency = 1;
-                float noiseHeight = 0;
-                float maxPossibleHeight = 0;
+            float hash(float2 p) {
+                float3 p3  = frac(float3(p.xyx) * .1031);
+                p3 += dot(p3, p3.yzx + 33.33);
+                return frac((p3.x + p3.y) * p3.z);
+            }
 
-                const int octaves = 6;
-                const float persistence = 0.6;
-                const float lacunarity = 2.0;
-                
-                for (int i = 0; i < octaves; i++)
-                {
-                    float2 samplePos = worldPos / scale * frequency;
-                    float perlinValue = perlinNoise(samplePos) * 2 - 1;
-                    noiseHeight += perlinValue * amplitude;
-                    
-                    maxPossibleHeight += amplitude;
-                    amplitude *= persistence;
-                    frequency *= lacunarity;
-                }
-
-                // Global normalization
-                float normalizedHeight = (noiseHeight + 1) / (maxPossibleHeight / 0.9);
-                return saturate(normalizedHeight);
+            float noise(float2 position) {
+                float2 i = floor(position);
+                float2 f = frac(position);
+    
+                // Smoothstep interpolation
+                f = f * f * (3.0 - 2.0 * f);
+    
+                float a = hash(i);
+                float b = hash(i + float2(1.0, 0.0));
+                float c = hash(i + float2(0.0, 1.0));
+                float d = hash(i + float2(1.0, 1.0));
+    
+                return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
             }
 
             float3 calculateWind(float3 worldPos, float height) {
@@ -160,19 +138,19 @@ Shader "Custom/TerrainGrassShader" {
                 float3 normal = normalize(IN[0].normal);
                 float moisture = IN[0].moisture;
 
-                    // DEBUG: Always output at least one grass blade with color indicating moisture
-                float3 baseColor = float3(moisture, 0, 1-moisture); // Red = dry, Blue = wet
-
                 // Don't generate grass below water level or on low moisture areas
+                // More precise water level check using world position
                 float heightAboveWater = pos.y - _WaterLevel;
                 if (moisture < _MoistureThreshold || heightAboveWater < 0.05) return;
 
-                // Use noise to determine grass placement
-                float noiseValue = sampleNoise(pos.xz, 50);
-                if (noiseValue < 0.3) return;
+                    // Calculate clumping value
+                float2 clumpPos = pos.xz / _ClumpScale;
+                float clumpNoise = noise(clumpPos);
+                clumpNoise = pow(clumpNoise, 1.0 - _ClumpSpread); // Adjust distribution
 
-                // Generate multiple grass blades per triangle based on density
-                int numBlades = (int)(_GrassDensity * 4); // Up to 4 blades per triangle
+                // Modify density based on clumping
+                int numBlades = (int)(_GrassDensity * 3 * clumpNoise);
+
                 for(int blade = 0; blade < numBlades; blade++) {
                     // Interpolate position within triangle
                     float3 weights = float3(
@@ -192,29 +170,33 @@ Shader "Custom/TerrainGrassShader" {
                         IN[1].normal * weights.y + 
                         IN[2].normal * weights.z);
 
-                    // Simple noise variation for blade
-                    float2 bladeNoisePos = (bladePos.xz + _ChunkOffset.xz) / 50;
-                    float bladeNoise = sampleNoise(bladeNoisePos, 50);
-                    
-                    // Use noise for height variation
-                    float waterProximity = saturate(heightAboveWater / 1.0);
-                    float height = _GrassHeight * (0.7 + noiseValue * 0.3) * moisture * waterProximity;
-                    float width = _GrassWidth * (0.8 + rand(bladePos) * 0.4);
+                    float random = rand(bladePos + blade);
+                    // Adjust grass height based on water proximity
+                    float waterProximity = saturate(heightAboveWater / 1.0); // Sharper transition near water
+                    float height = _GrassHeight * (0.7 + random * 0.3) * moisture * waterProximity;
+                    float width = _GrassWidth * (0.8 + random * 0.4);
 
                     // Randomize orientation
-                    float angle = rand(bladePos) * 3.14159 * 2;
+                    float angle = random * 3.14159 * 2;
                     float3 tangent = normalize(float3(cos(angle), 0, sin(angle)));
                     float3 bitangent = normalize(cross(bladeNormal, tangent));
+
+                    // Adjust position within clump
+                    float clumpOffset = rand(bladePos + blade) * 0.2 * (1.0 - clumpNoise);
+                    bladePos.xz += float2(cos(angle), sin(angle)) * clumpOffset;
+
+                    // Vary height within clump
+                    height *= lerp(0.8, 1.2, rand(bladePos));
 
                     float3 windOffset = calculateWind(bladePos, height);
                     float3 bendOffset = tangent * (_GrassBend * height);
 
                     // Generate blade vertices
                     g2f o[6];
-                    // Use noise for color variation
+                    // Minimal height-based color variation
                     float heightInfluence = lerp(0.95, 1.0, saturate(heightAboveWater * 0.1));
                     float3 baseColor = _GrassColor.rgb * heightInfluence;
-                    baseColor *= (1.0 - bladeNoise * _GrassColorVariation * 0.2);
+                    baseColor *= (1.0 - random * _GrassColorVariation * 0.3); // Reduced variation
 
                     // Base
                     o[0].worldPos = bladePos - tangent * width;
